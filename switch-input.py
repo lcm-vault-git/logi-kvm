@@ -146,15 +146,15 @@ class UnifyingDevice:
         # Initial value indicating fault
         target_channel = -1
         if len(self.switch_detect_message) <= len(input_bytes):
-            if (self.dev_type.lower() == 'MX Keys'.lower()) or (self.dev_type.lower() == 'MX Master 3'.lower()):
+            if (self.dev_type.lower() == 'MX Keys'.lower()) or (self.dev_type.lower() == 'MX Master 3'.lower()) or (self.dev_type.lower() == 'Ergo K860'.lower()) or (self.dev_type.lower() == 'MK850'.lower()):
                 # Compare first 5 bytes (0 - 4) and byte 6. Byte 5 contains information about new channel.
                 if (input_bytes[:4] == self.switch_detect_message[:4]) and \
                         (input_bytes[6] == self.switch_detect_message[6]):
                     for esk in self.easy_switch_keys:
                         if esk == input_bytes[5]:
                             target_channel = self.easy_switch_keys.index(esk)
-            elif self.dev_type.lower() == 'MX Ergo'.lower():
-                # MX Ergo doesn't send information about switch button event
+            elif self.dev_type.lower() == 'MX Ergo'.lower() or len(self.switch_detect_message) == 0:
+                # Device doesn't send information about switch button event
                 target_channel = -2
             else:
                 raise NotImplementedError
@@ -266,8 +266,29 @@ def main_loop(self_channel, config_file):
 
     else:
         config = populate_devices(self_channel)
+    # Find the keyboard device (the one with easy_switch_keys or switch_detect_message)
+    keyboard_slot = None
+    for dev in config.unifying_devices:
+        if len(dev.easy_switch_keys) > 0 or len(dev.switch_detect_message) > 0:
+            keyboard_slot = dev.slot_id
+            break
+
     while True:
         read_bytes = unifying_listen()
+        logging.debug("Raw HID data: %s" % str(read_bytes))
+
+        # Detect keyboard connection via register 0x04
+        # When keyboard arrives on this receiver, switch mouse to this PC too
+        if len(read_bytes) >= 4 and read_bytes[2] == 0x04 and keyboard_slot is not None and read_bytes[1] == keyboard_slot:
+            is_connect = (read_bytes[3] & 0x40) == 0
+            if is_connect:
+                logging.info("Keyboard connected (slot %d), switching mouse to self channel %d" % (keyboard_slot, self_channel))
+                for dev in config.unifying_devices:
+                    if dev.slot_id != keyboard_slot:
+                        dev.switch_channel(self_channel)
+            continue
+
+        # Original Easy-Switch key detection (fallback)
         for unifying_device in config.unifying_devices:
             channel_number = unifying_device.decode_target_channel_number(read_bytes)
             if channel_number >= 0:
