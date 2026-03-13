@@ -81,9 +81,9 @@ def ping_device(slot_id):
         unifying_write([0x10, slot_id, 0x00, 0x10, 0x00, 0x00, 0xAA])
     except Exception:
         return False
-    # Read responses for up to 500ms, looking for one from our slot
+    # Read responses for up to 200ms, looking for one from our slot
     start = time.time()
-    while (time.time() - start) * 1000 < 500:
+    while (time.time() - start) * 1000 < 200:
         data = listen_handle.read(64)
         if data and len(data) >= 2:
             logging.debug("Ping response: %s" % str(data))
@@ -308,7 +308,7 @@ def main_loop(self_channel, config_file):
             keyboard_slot = dev.slot_id
             break
 
-    PING_INTERVAL = 1.0  # seconds between keyboard pings
+    PING_INTERVAL = 0.3  # seconds between keyboard pings
     PING_MISS_THRESHOLD = 2  # consecutive misses before declaring keyboard gone
     keyboard_present = True
     ping_miss_count = 0
