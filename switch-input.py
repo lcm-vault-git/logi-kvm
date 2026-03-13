@@ -22,6 +22,7 @@ from logging.handlers import RotatingFileHandler
 import monitorcontrol
 import hid
 import json
+import time
 
 __author__ = "Konrad Foit"
 __copyright__ = "Copyright 2022, Konrad Foit"
@@ -41,22 +42,56 @@ UNIFYING_RECEIVER_SEND_USAGE = 0x0001
 listen_device_path = ""
 send_device_path = ""
 
+# Persistent HID handles
+listen_handle = None
+send_handle = None
 
-def unifying_listen():
-    h = hid.device()
-    h.open_path(listen_device_path)
-    h.set_nonblocking(0)
-    data = h.read(11)
-    h.close()
-    return data
+
+def open_hid_handles():
+    global listen_handle, send_handle
+    listen_handle = hid.device()
+    listen_handle.open_path(listen_device_path)
+    listen_handle.set_nonblocking(1)
+    send_handle = hid.device()
+    send_handle.open_path(send_device_path)
+    send_handle.set_nonblocking(0)
+
+
+def unifying_listen(timeout_ms=500):
+    start = time.time()
+    while (time.time() - start) * 1000 < timeout_ms:
+        data = listen_handle.read(64)
+        if data:
+            return data
+        time.sleep(0.01)
+    return []
 
 
 def unifying_write(data):
-    h = hid.device()
-    h.open_path(send_device_path)
-    h.set_nonblocking(0)
-    h.write(data)
-    h.close()
+    send_handle.write(data)
+
+
+def ping_device(slot_id):
+    """Send HID++ 2.0 ping (IRoot feature 0x00, function 1) to check if device is present.
+    Returns True if device responds, False otherwise.
+    """
+    try:
+        # HID++ 2.0 ping: feature_index=0x00 (IRoot), function=1 (ping), sw_id=0
+        # Response echoes back ping_data (0xAA) if device is present
+        unifying_write([0x10, slot_id, 0x00, 0x10, 0x00, 0x00, 0xAA])
+    except Exception:
+        return False
+    # Read responses for up to 500ms, looking for one from our slot
+    start = time.time()
+    while (time.time() - start) * 1000 < 500:
+        data = listen_handle.read(64)
+        if data and len(data) >= 2:
+            logging.debug("Ping response: %s" % str(data))
+            if data[1] == slot_id:
+                return True
+        if not data:
+            time.sleep(0.01)
+    return False
 
 
 def usb_discover():
@@ -273,29 +308,75 @@ def main_loop(self_channel, config_file):
             keyboard_slot = dev.slot_id
             break
 
+    PING_INTERVAL = 1.0  # seconds between keyboard pings
+    PING_MISS_THRESHOLD = 2  # consecutive misses before declaring keyboard gone
+    keyboard_present = True
+    ping_miss_count = 0
+    last_ping_time = time.time()
+
+    logging.info("Using ping-based keyboard detection (slot %s, interval %.1fs, threshold %d)" %
+                 (keyboard_slot, PING_INTERVAL, PING_MISS_THRESHOLD))
+
     while True:
-        read_bytes = unifying_listen()
-        logging.debug("Raw HID data: %s" % str(read_bytes))
+        try:
+            # Read any pending HID data (non-blocking with short timeout)
+            read_bytes = unifying_listen(timeout_ms=200)
+            if read_bytes:
+                logging.debug("Raw HID data: %s" % str(read_bytes))
 
-        # Detect keyboard connection via register 0x04
-        # When keyboard arrives on this receiver, switch mouse to this PC too
-        if len(read_bytes) >= 4 and read_bytes[2] == 0x04 and keyboard_slot is not None and read_bytes[1] == keyboard_slot:
-            is_connect = (read_bytes[3] & 0x40) == 0
-            if is_connect:
-                logging.info("Keyboard connected (slot %d), switching mouse to self channel %d" % (keyboard_slot, self_channel))
-                for dev in config.unifying_devices:
-                    if dev.slot_id != keyboard_slot:
-                        dev.switch_channel(self_channel)
-            continue
+            # Detect keyboard connection via register 0x04 (if receiver sends it)
+            if read_bytes and len(read_bytes) >= 4 and read_bytes[2] == 0x04 and keyboard_slot is not None and read_bytes[1] == keyboard_slot:
+                is_connect = (read_bytes[3] & 0x40) == 0
+                if is_connect:
+                    if not keyboard_present:
+                        keyboard_present = True
+                        ping_miss_count = 0
+                        logging.info("Keyboard connected (slot %d), switching mouse to self channel %d" % (keyboard_slot, self_channel))
+                        for dev in config.unifying_devices:
+                            if dev.slot_id != keyboard_slot:
+                                dev.switch_channel(self_channel)
+                continue
 
-        # Original Easy-Switch key detection (fallback)
-        for unifying_device in config.unifying_devices:
-            channel_number = unifying_device.decode_target_channel_number(read_bytes)
-            if channel_number >= 0:
-                if channel_number != self_channel:
-                    logging.info("Switch to channel " + str(channel_number) + " from device \'" +
-                                 unifying_device.dev_type + "\' at slot " + str(unifying_device.slot_id))
-                    config.switch_channel(channel_number, unifying_device.slot_id)
+            # Original Easy-Switch key detection (fallback)
+            if read_bytes:
+                for unifying_device in config.unifying_devices:
+                    channel_number = unifying_device.decode_target_channel_number(read_bytes)
+                    if channel_number >= 0:
+                        if channel_number != self_channel:
+                            logging.info("Switch to channel " + str(channel_number) + " from device \'" +
+                                         unifying_device.dev_type + "\' at slot " + str(unifying_device.slot_id))
+                            config.switch_channel(channel_number, unifying_device.slot_id)
+
+            # Periodic keyboard ping to detect departure
+            now = time.time()
+            if keyboard_slot is not None and (now - last_ping_time) >= PING_INTERVAL:
+                last_ping_time = now
+                is_alive = ping_device(keyboard_slot)
+                if is_alive:
+                    if not keyboard_present:
+                        # Keyboard came back
+                        keyboard_present = True
+                        ping_miss_count = 0
+                        logging.info("Keyboard returned (slot %d), switching mouse to self channel %d" % (keyboard_slot, self_channel))
+                        for dev in config.unifying_devices:
+                            if dev.slot_id != keyboard_slot:
+                                dev.switch_channel(self_channel)
+                    else:
+                        ping_miss_count = 0
+                else:
+                    ping_miss_count += 1
+                    logging.debug("Keyboard ping miss %d/%d" % (ping_miss_count, PING_MISS_THRESHOLD))
+                    if ping_miss_count >= PING_MISS_THRESHOLD and keyboard_present:
+                        # Keyboard is gone - switch mouse to other channel
+                        keyboard_present = False
+                        other_channel = 1 - self_channel
+                        logging.info("Keyboard departed (slot %d), switching mouse to channel %d" % (keyboard_slot, other_channel))
+                        for dev in config.unifying_devices:
+                            if dev.slot_id != keyboard_slot:
+                                dev.switch_channel(other_channel)
+        except Exception as e:
+            logging.error("Error in main loop: %s" % str(e))
+            time.sleep(1)
 
 
 if __name__ == '__main__':
@@ -324,6 +405,14 @@ if __name__ == '__main__':
 
     logging.info("Discovering USB devices")
     usb_discover()
+
+    logging.info("Opening persistent HID handles")
+    open_hid_handles()
+
+    # Enable wireless device connect/disconnect notifications on the receiver
+    # HID++ 1.0: SET register 0x00, byte 0 bit 2 = wireless device status
+    logging.info("Enabling wireless device notifications on receiver")
+    unifying_write([0x10, 0xFF, 0x80, 0x00, 0x04, 0x00, 0x00])
 
     logging.info("Self unifying channel is " + str(args['channel']))
     main_loop(args['channel'], args['config'])

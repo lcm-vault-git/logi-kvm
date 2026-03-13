@@ -21,7 +21,7 @@
             "switch_detect_message": [],
             "easy_switch_keys": [],
             "switch_message": [
-                16, 2, 8, 30, 255, 0, 0
+                16, 2, 9, 30, 255, 0, 0
             ],
             "max_channels": 2
         }
