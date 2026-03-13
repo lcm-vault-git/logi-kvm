@@ -16,8 +16,46 @@ Any Unifying Hardware should be compatible. In order to add other Unifying devic
 Default configuration is created in function populate_config.
 
 ## Usage:
-`python input_switch -h`
-`python input_switch 0 -c config.json`
+```
+python switch-input.py -h
+python switch-input.py <CHANNEL> -c config.json
+```
+
+- `CHANNEL`: this PC's Unifying channel number (0-indexed)
+  - PC 1 → `0`
+  - PC 2 → `1`
+
+Example:
+```bash
+# PC 1
+python switch-input.py 0 -c config.json
+
+# PC 2
+python switch-input.py 1 -c config.json
+```
+
+The config file (`config.json`) is shared across both PCs. Only the channel argument differs.
+
+### Windows startup (background)
+Create a `.vbs` file in `shell:startup`:
+```vbs
+Set WshShell = CreateObject("WScript.Shell")
+WshShell.Run "cmd /c cd /d C:\path\to\logi-kvm && python switch-input.py <CHANNEL> -c config.json", 0, False
+```
+
+## Ping-based keyboard detection (for keyboards without Easy-Switch events)
+
+Some keyboards (e.g. ERGO K860) do **not** send Easy-Switch key events via HID++. For these keyboards, the script uses a ping-based detection method:
+
+1. Periodically sends HID++ 2.0 ping to the keyboard slot
+2. If the keyboard responds → it's still connected to this PC
+3. If ping misses exceed threshold → keyboard has switched to another PC → mouse is automatically switched to follow
+
+This requires the script to run on **both PCs**:
+- When keyboard leaves PC 2 → PC 2 detects ping miss → sends mouse to PC 1
+- When keyboard leaves PC 1 → PC 1 detects ping miss → sends mouse to PC 2
+
+**Battery note**: Constant pinging prevents the keyboard from entering deep sleep. The default ping interval (0.3s) prioritizes fast switching over battery life. Increase `PING_INTERVAL` in the script for better battery life (e.g. 2-3s).
 
 ## Adding other Unifying devices with change host capability
 Best tool to discover how to make unifying device change host is to use [Solaar](https://github.com/pwr-Solaar/Solaar) on linux and list all field of devices by calling:
@@ -65,7 +103,42 @@ Nice tool to play around and make sure that VCP message number and values for in
 
 ## Example config files:
 
-**IMPORTANT: JSON is sensitive for commas at the lat field of object!**
+**IMPORTANT: JSON is sensitive for commas at the last field of object!**
+
+**No monitor, ERGO K860 and MX Anywhere 2S (ping-based, 2 PCs):**
+```json
+{
+    "monitors": [],
+    "unifying_devices": [
+        {
+            "slot_id": 1,
+            "dev_type": "ERGO K860",
+            "switch_detect_message": [
+                17, 1, 8, 32, 0, 255, 1, 0, 0, 0, 0
+            ],
+            "easy_switch_keys": [
+                209, 210, 211
+            ],
+            "switch_message": [
+                16, 1, 9, 30, 255, 0, 0
+            ],
+            "max_channels": 2
+        },
+        {
+            "slot_id": 2,
+            "dev_type": "MX Anywhere 2S",
+            "switch_detect_message": [],
+            "easy_switch_keys": [],
+            "switch_message": [
+                16, 2, 8, 30, 255, 0, 0
+            ],
+            "max_channels": 2
+        }
+    ],
+    "unifying_channel": 0
+}
+```
+Run with `switch-input.py 0` on PC 1, `switch-input.py 1` on PC 2.
 
 **One monitor, MX keys and MX Ergo:**
 ```json
